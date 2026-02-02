@@ -1,7 +1,7 @@
 # Changelog
 
 <!--next-version-placeholder-->
-## 0.0.1
+## 0.1.0
 - New Fork with chatgpt changes
 ## 1.0.3
 - Added support for multiple Bluetooth scanners/gateways. Now the BM6 device is supported by more than one Bluetooth scanner/gateway. The scanner with the best signal strength is automatically selected to connect to the BM6. If you have more than one scanner/gateway, this version is just for you.
