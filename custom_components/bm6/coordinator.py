@@ -4,6 +4,7 @@ This module contains the BM6DataUpdateCoordinator class, which manages fetching 
 
 from __future__ import annotations
 
+import time
 import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -60,6 +61,14 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
         self.config_entry = config_entry
         self.device_address = config_entry.data[CONF_DEVICE_ADDRESS]
         self._battery = Battery(config_entry.data)
+        # Stale-data handling (Option 2)
+        self._last_good_data: dict | None = None
+        self._last_success_monotonic: float | None = None
+        self._consecutive_failures: int = 0
+
+        # Tunables
+        self._failures_before_unavailable = 3
+        self._stale_after_seconds = 300  # 5 minutes
         super().__init__(
             hass,
             _LOGGER,
@@ -74,6 +83,12 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
                 hass=self.hass, address=self.device_address
             )
             data: BM6Data = await connector.get_data()
+            _LOGGER.debug(
+                "BM6 %s got data: RealTime=%s Adv=%s",
+                self.device_address,
+                getattr(data, "RealTime", None),
+                getattr(data, "Advertisement", None),
+            )
             voltage_corrected = (
                 data.RealTime.Voltage + self.config_entry.data[CONF_VOLTAGE_OFFSET]
             )
@@ -83,7 +98,17 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
                 + self.config_entry.data[CONF_TEMPERATURE_OFFSET]
             )
             self._battery.update(data.RealTime, voltage_corrected)
-            return {
+            _LOGGER.debug(
+                "BM6 %s voltage=%r temp=%r pct=%r state=%r rssi=%r scanner=%r",
+                self.device_address,
+                getattr(data.RealTime, "Voltage", None),
+                getattr(data.RealTime, "Temperature", None),
+                getattr(data.RealTime, "Percent", None),
+                getattr(data.RealTime, "State", None),
+                getattr(data.Advertisement, "RSSI", None) if data.Advertisement else None,
+                getattr(data.Advertisement, "Scanner", None) if data.Advertisement else None,
+            )
+            result = {
                 KEY_VOLTAGE_DEVICE: data.RealTime.Voltage,
                 KEY_VOLTAGE_CORRECTED: voltage_corrected,
                 KEY_TEMPERATURE_DEVICE: data.RealTime.Temperature,
@@ -107,7 +132,40 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
                 KEY_RAPID_DECELERATION: data.RealTime.RapidDeceleration,
                 KEY_BLUETOOTH_SCANNER: data.Advertisement.Scanner,
             }
+            # Mark fresh success
+            self._last_good_data = result
+            self._last_success_monotonic = time.monotonic()
+            self._consecutive_failures = 0
+
+            return result
         except BM6DeviceError as e:
+            msg = str(e)
+            if "not found" in msg.lower():
+                self._consecutive_failures += 1
+                _LOGGER.debug(
+                    "BM6 %s not found (likely out of range/off): %s (miss %s)",
+                    self.device_address,
+                    e,
+                    self._consecutive_failures,
+                )
+
+                now = time.monotonic()
+                last_ok = self._last_success_monotonic
+                age = (now - last_ok) if last_ok is not None else None
+
+                # Soft fail: keep last good data briefly
+                if (
+                    self._last_good_data is not None
+                    and self._consecutive_failures < self._failures_before_unavailable
+                    and age is not None
+                    and age < self._stale_after_seconds
+                ):
+                    return self._last_good_data
+
+                # Hard fail: mark unavailable
+                raise UpdateFailed(
+                    f"BM6 {self.device_address} unavailable (misses={self._consecutive_failures}, age={age})"
+                ) from e
             _LOGGER.error("BM6 device error at %s: %s", self.device_address, e)
             raise UpdateFailed(f"BM6 device error: {e}") from e
         except Exception as e:
