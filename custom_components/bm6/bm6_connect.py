@@ -71,7 +71,7 @@ def _realtime_all_zeros(rt) -> bool:
         return True
     return v == 0.0 and t == 0 and p == 0
 
-PREFERRED_SCANNERS: set[str] = {"bt-prox-3"}
+PREFERRED_SCANNERS: set[str] = set()
 
 
 # Try to use HA-recommended connector helper if available
